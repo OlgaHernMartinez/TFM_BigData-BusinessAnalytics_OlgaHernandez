@@ -1,0 +1,442 @@
+---
+title: "Data Analysis Walmart"
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+Primeramente se limpia el espacio de trabajo:
+```{r}
+rm(list = ls())
+
+```
+
+
+Carga de datos
+```{r}
+datos <- read.csv("walmart.csv")
+```
+
+Breve estudio de los datos cargados
+```{r}
+class(datos)
+head(datos)
+str(datos)
+dim(datos)
+colnames(datos)
+summary(datos)
+
+```
+
+A continuación se van a eliminar las columnas que no utilizaremos para el análisis
+```{r}
+#Borramos: X, MarkDown1, MarkDown2, MarkDown3, MarkDown4, MarkDown5, Type y Size
+borrar <- c("X","MarkDown1", "MarkDown2", "MarkDown3", "MarkDown4", "MarkDown5", "Type", "Size")
+datos2 <- datos[ , !(names(datos) %in% borrar)]
+colnames(datos2)
+
+```
+
+Convertimos en formato fecha la variable "Date"
+```{r}
+datos2$Date <- as.Date(datos2$Date)
+head(datos2)
+```
+Convertimos en factor la variable IsHoliday asociando el valor 1 a True y 0 a False
+```{r}
+fact.cols <- c("IsHoliday")
+datos2[fact.cols] <- lapply(datos2[fact.cols], factor)
+datos2$IsHoliday <- (datos2$IsHoliday == "TRUE")*1
+str(datos2)
+```
+
+Se eliminan los registros donde Weekly_Sales toma el valor de 0
+```{r}
+datos2 <- na.omit(datos2)
+datos2 <- datos2[datos2$Weekly_Sales>0,]
+summary(datos2)
+
+```
+
+`
+
+
+Agrupamos los datos según las tiendas y sus fechas:
+```{r}
+#install.packages("dplyr")
+library(dplyr)
+datos_new <- datos2 %>%  group_by(Store,Date,IsHoliday, Temperature, Fuel_Price,CPI, Unemployment) %>% 
+   summarise(TotalSalesWeek = sum(Weekly_Sales))
+
+```
+
+
+```{r}
+#write.csv(datos_new, "walmart_new.csv")
+```
+
+
+
+###### REGRESIÓN LINEAL #######
+
+Inicialmente creamos un modelo con todas las variables
+```{r}
+
+modelo <- lm(TotalSalesWeek ~., datos_new)
+modelo
+summary(modelo)
+
+```
+
+
+Eliminamos Date y Fuel_Price:
+```{r}
+modelo2 <- lm(TotalSalesWeek~Store+IsHoliday+ CPI +Unemployment+Temperature,data=datos_new)
+summary(modelo2)
+```
+
+
+Probamos con StepAIC
+```{r}
+library(MASS)
+fit1 <- lm(TotalSalesWeek ~., datos_new)
+fit0 <- lm(TotalSalesWeek ~1, datos_new)
+
+stepAIC(fit1,direction="backward")
+stepAIC(fit0,direction="forward",scope=list(upper=fit1,lower=fit0))
+
+
+```
+
+
+```{r}
+lm.fit  <- lm(TotalSalesWeek~Store+IsHoliday+CPI+Unemployment+ Temperature,data=datos_new)
+summary(lm.fit)
+coef(lm.fit)
+anova(lm.fit)
+
+#Multicolinealidad
+car::vif(lm.fit)
+
+```
+
+```{r}
+myvars <- names(datos_new) %in% c("Date")
+newdata <- datos_new[!myvars]
+newdata %>% cor(method="pearson") %>% round(digits=2) -> mat_cor
+mat_cor
+```
+
+```{r}
+library(corrplot)
+corrplot(mat_cor, type="upper", order="hclust", tl.col="black", tl.srt=45)
+```
+
+Obtenemos los valores ajustados  y los residuos
+```{r}
+ajustados  <- fitted(lm.fit) 
+#residuals(lm.fit) 
+residuos <- residuals(lm.fit)
+hist(residuos)
+#rstandard(lm.fit)
+#rstudent(lm.fit)
+
+```
+
+
+
+Independencia
+```{r}
+plot(predict(lm.fit), rstandard(lm.fit))
+abline(h=0)
+```
+
+Normalidad de los residuos
+```{r}
+qqnorm(residuos);qqline(residuos)
+
+```
+
+
+
+
+###### SERIES TEMPORALES #######
+
+Representamos gráficamente los datos
+```{r}
+#install.packages("ggplot2")
+library(ggplot2)
+
+ggplot(aes(x= Date, y = TotalSalesWeek), data = datos_new) + geom_line(color = '#d84519') + 
+  xlab('Date') + ylab('Weekly_Sales') + scale_x_date(date_breaks = '4 months', date_labels = "%m/%y")
+
+```
+
+```{r}
+datos.ts <- ts(datos_new$TotalSalesWeek, start=c(2010,2), end=c(2013,7), frequency=365)
+class(datos.ts)
+```
+
+```{r}
+desc <- decompose(datos.ts)
+plot(desc$figure)
+```
+
+```{r}
+plot(desc$trend)
+plot(desc$seasonal)
+plot(stl(datos.ts, s.window = "periodic"))
+```
+
+```{r}
+#install.packages("forecast")
+library(forecast)
+ggseasonplot(datos.ts)
+```
+Se divide la muestra en entrenamiento y validación
+```{r}
+datos.train <- subset(datos_new, "2010-02-05"<=Date & Date<="2012-02-05")
+datos.train.ts <- as.ts(datos.train$TotalSalesWeek, frequency = 12)
+
+datos.validate <- subset(datos_new, Date>"2012-02-05")
+datos.validate.ts <- as.ts(datos.validate$TotalSalesWeek, frequency=12)
+
+```
+
+Se estudia la estacionariedad en media y en varianza de la serie
+```{r}
+#install.packages("tseries")
+library(tseries)
+
+#¿Es estacionaria en media? 
+# Test de Dickey-Fuller
+
+adf.test(datos.train.ts, alternative="stationary", k=30)
+
+```
+
+```{r}
+ #¿Es estacionaria en varianza?
+
+box_cox <- boxcox(TotalSalesWeek ~ Date,
+                  data = datos.train,
+                  lambda = seq(-2, 2, 1/10))
+
+lambda <- box_cox$x[which.max(box_cox$y)]
+lambda
+```
+
+
+
+Graficamente decidimos si elegir la transformación logaritmica o sqrt.
+```{r}
+#install.packages("car")
+library(car)
+
+plot.ts(datos.train.ts)
+plot.ts(sqrt(datos.train.ts))
+plot.ts(log(datos.train.ts))
+```
+Se propone el cambio logaritmico.
+```{r}
+datos.train.ts <- log(datos.train.ts)
+```
+
+
+Ajustamos un modelo ARIMA a la serie
+
+```{r}
+acf(datos.train.ts,lag.max=48)
+pacf(datos.train.ts,lag.max=48)
+tsdisplay(datos.train.ts)
+
+```
+Proponemos MA(1)
+```{r}
+ajuste1 <- Arima(datos.train.ts,
+                 order = c(0,0,1),
+                 method = "ML")
+ajuste1
+
+
+acf(ajuste1$residuals)
+pacf(ajuste1$residuals)
+tsdisplay(ajuste1$residuals)
+```
+d = 1, q= 1
+```{r}
+ajuste2 <- Arima(datos.train.ts,
+                 order = c(0,1,1),
+                 method = "ML")
+ajuste2
+
+
+acf(ajuste2$residuals)
+pacf(ajuste2$residuals) 
+tsdisplay(ajuste2$residuals)
+```
+p = 4, d= 1, q=1
+```{r}
+ajuste3 <- Arima(datos.train.ts,
+                 order = c(4,1,1),
+                 method = "ML")
+ajuste3
+acf(ajuste3$residuals)
+pacf(ajuste3$residuals) 
+tsdisplay(ajuste3$residuals)
+```
+
+Se utiliza auto arima para encontrar un mejor modelo:
+```{r}
+Auto_model <- auto.arima(datos.train.ts,trace=TRUE, stepwise = FALSE, parallel=TRUE, num.cores = 6 )
+plot(forecast(Auto_model,h=24))
+summary(Auto_model)
+tsdisplay(residuals(Auto_model))
+
+```
+Se añade al auto arima, P=1, D=1
+```{r}
+ajuste4 <- Arima(datos.train.ts,
+                 order = c(0,1,5),
+                 seasonal = list(order = c(1,1,0), period = 12),
+                 method = "ML")
+ajuste4
+acf(ajuste4$residuals)
+pacf(ajuste4$residuals)
+tsdisplay(residuals(ajuste4))
+```
+
+Como no conseguimos quitar p,q=12,24. Probamos a añadir outliers al ajuste:
+```{r}
+#install.packages('tsoutliers')
+library(tsoutliers)
+
+listaOutliersTrain <- locate.outliers(ajuste4$residuals,
+                                      pars = coefs2poly(ajuste4),
+                                      types = c("AO", "LS", "TC"),cval=3)
+```
+
+Y los añadimos a los festivos:
+```{r}
+datos.train$ind <- as.numeric(rownames(datos.train))
+listaOutliersTrainFecha <- merge(listaOutliersTrain, datos.train[,c("ind", "Date")], by = "ind")
+
+#unique(listaOutliersTrainFecha$Date)
+outliers <- outliers(c("AO", "AO", "LS", "TC"), c(270, 651, 275, 177))
+outliersVariables <- outliers.effects(outliers, length(ajuste4$residuals))
+festivos.train <- datos.train$IsHoliday
+festivos.validate <- datos.validate$IsHoliday
+festivos_outliers <- cbind(festivos.train,outliersVariables)
+```
+
+
+
+
+```{r}
+library(lmtest)
+ajuste5conFestivosYOutliers <- Arima(datos.train.ts,
+                 order = c(0,1,5),
+                 seasonal = list(order = c(1,1,0), period = 12),
+                 xreg = festivos.train,
+                 method = "ML")
+ajuste5conFestivosYOutliers
+acf(ajuste5conFestivosYOutliers$residuals)
+pacf(ajuste5conFestivosYOutliers$residuals)
+tsdisplay(residuals(ajuste5conFestivosYOutliers))
+
+
+coeftest(ajuste5conFestivosYOutliers)
+```
+Todas las variables son significativas
+
+Aplicamos el modelo a futuro con los datos de validación
+```{r}
+ajuste5_futuro <- Arima(datos.validate.ts,
+                 order = c(0,1,5),
+                 seasonal = list(order = c(1,1,0), period = 12),
+                 xreg = festivos.validate,
+                 method = "ML")
+ajuste5_futuro
+acf(ajuste5_futuro$residuals)
+pacf(ajuste5_futuro$residuals)
+tsdisplay(residuals(ajuste5_futuro))
+
+
+prediccion <- as.data.frame(predict(ajuste5_futuro,
+                                       newxreg = festivos.validate,
+                                     n.ahead= 1710))
+
+
+```
+
+
+
+Cálculo de errores (MAPE)
+
+```{r}
+# Incluyendo festivos
+
+predFes <- as.data.frame(exp(ajuste5conFestivosYOutliers$fitted))
+
+
+names(predFes) <- "Pred_Sales"
+realYPrediccionFes <- cbind(datos.train,predFes)
+realYPrediccionFes$MAPEDiario <- abs(100*(realYPrediccionFes$TotalSalesWeek-realYPrediccionFes$Pred_Sales)/realYPrediccionFes$TotalSalesWeek)
+
+# Error global sobre histórico:
+mean(realYPrediccionFes$MAPEDiario)
+
+
+```
+
+
+```{r}
+
+predFutura <- as.data.frame(ajuste5_futuro$fitted)
+names(predFutura) <- "Sales_PRED"
+realYPrediccionFut <- cbind(datos.validate,predFutura)
+realYPrediccionFut$MAPEDiario <- abs(100*(realYPrediccionFut$TotalSalesWeek-realYPrediccionFut$Sales_PRED)/realYPrediccionFut$TotalSalesWeek)
+
+# Error global a futuro
+mean(realYPrediccionFut$MAPEDiario)
+
+```
+
+
+```{r}
+# Grafico 1: Real vs Prediccion Training
+
+datos.pred <- data.frame(fecha = realYPrediccionFes$Date, Prediccion = realYPrediccionFes$Pred_Sales, totalSales= realYPrediccionFes$TotalSalesWeek)
+
+grafico <- ggplot(data = datos.pred) +
+  geom_line(aes(x= fecha, y = Prediccion), color = 'steelblue',
+            alpha = 0.8, size = 1) +
+  geom_line(aes(x= fecha, y = totalSales), color = 'darkred',
+            alpha = 0.9, linetype = 2, size = 1) + 
+  xlab('FECHA') + ylab('Sales')
+
+grafico
+
+```
+
+```{r}
+# Grafico 1: Real vs Prediccion Validate
+
+datos.pred <- data.frame(fecha = realYPrediccionFut$Date, Prediccion = realYPrediccionFut$Sales_PRED, totalSales= realYPrediccionFut$TotalSalesWeek)
+
+grafico <- ggplot(data = datos.pred) +
+  geom_line(aes(x= fecha, y = Prediccion), color = 'steelblue',
+            alpha = 0.8, size = 1) +
+  geom_line(aes(x= fecha, y = totalSales), color = 'darkred',
+            alpha = 0.9, linetype = 2, size = 1) + 
+  xlab('FECHA') + ylab('Sales')
+
+grafico
+
+```
+
+
+
+
+
